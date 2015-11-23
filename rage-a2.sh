@@ -296,8 +296,11 @@ function uninstall() {
 function start() {
   recho "       Launching images"
   recho "-------------------------------"
-  launch_and_wait 60 redis mongo
-  launch_and_wait 1 a2
+  launch_and_wait 5 redis mongo
+  wait_for_service redis 6379
+  wait_for_service mongo 27017
+  launch_and_wait 5 a2
+  wait_for_service a2 3000
   recho ' * use "docker-compose logs <service> to inspect service logs'
   recho ' * use "docker-compose ps" to see status of all services'
   recho 'output of "docker-compose ps" follows:'
@@ -309,6 +312,21 @@ function stop() {
   recho "       Stopping containers"
   recho "-------------------------------"
   docker-compose stop
+}
+
+# poll service until connection succeeds
+function wait_for_service() {
+  docker_map
+  SERVICE_IP=$( docker inspect ${CONTAINERS[$1]} \
+    | grep IPAddress | grep -oE '([0-9]{1,3}[.]*){4}' )
+  echo -n "Waiting for $1 to be up at ${SERVICE_IP}:$2 ... "
+  T=0
+  until netcat -z ${SERVICE_IP} $2 ; do
+      sleep 1
+      echo -n "."
+      ((T++))
+  done
+  echo " OK! (took ${T}s)"
 }
 
 # map internal docker hashes to container-names and vice-versa
@@ -352,6 +370,9 @@ function purge() {
   recho "-------------------------------"
   docker-compose kill
   docker-compose rm -f -v
+  recho "(you may need root permissions to empty the data volume)"
+  sudo rm -r data/* \
+    && recho "data volume emptied"
 }
 
 # entrypoint
