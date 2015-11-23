@@ -5,7 +5,7 @@ This repository contains scripts to launch and manage the RAGE Authentication an
 This server is part of the [RAGE](http://rageproject.eu/) EU H2020 project 
 (Realizing an Applied Game Ecosystem), and provides authentication and authorization for server-side assets. It is a dependency [rage-analytics environment](https://github.com/e-ucm/rage-analytics/), and we recommend it be used by all other server-side assets.
 
-Note that the rage-analytics environment *already includes* ; if you are already launching the analytics environment, you should not use this script.
+Note that the rage-analytics environment *already includes* all services in this script; _if you are already launching the analytics environment, you should not use this script_.
 
 ## Hardware and Software Requirements
 
@@ -22,11 +22,11 @@ You will need docker v1.9 or greater and docker-compose v1.5 or greater installe
 ... and type `docker-compose ps` to check that everything has been launched. Expected output:
 
 ```
-           Name                         Command               State                    Ports                  
--------------------------------------------------------------------------------------------------------------
-rageanalytics_a2_1           npm run docker-start             Up       0.0.0.0:3000->3000/tcp                 
-rageanalytics_mongo_1        /entrypoint.sh mongod            Up       27017/tcp                              
-rageanalytics_redis_1        /entrypoint.sh redis-server      Up       6379/tcp                               
+Name              Command             State           Ports          
+--------------------------------------------------------------------
+a2      npm run docker-start          Up      0.0.0.0:3000->3000/tcp 
+mongo   /entrypoint.sh mongod         Up      27017/tcp              
+redis   /entrypoint.sh redis-server   Up      6379/tcp                               
 ```
 
 The following services will be launched:
