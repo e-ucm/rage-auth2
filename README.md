@@ -17,7 +17,7 @@ You will need docker v1.9 or greater and docker-compose v1.5 or greater installe
 
 0. Open a shell in a recent linux (we use Ubuntu 14.04+). You must be root (`sudo su -`) unless you already have `docker` running and a compatible version of `docker-compose` installed 
 1. Download the launch script: `wget https://raw.githubusercontent.com/e-ucm/rage-analytics/master/rage-a2.sh`
-2. Mark the script as executable, and launch it: `chmod +x rage-a2.sh && ./rage-a2.sh launch` (note that it requires `bash` to run). Besides `launch`, the scripts accepts several other commands - use `./rage-analytics.sh --help` to see their names and descriptions.
+2. Mark the script as executable, and launch it: `chmod +x rage-a2.sh && ./rage-a2.sh launch` (note that it requires `bash` to run). Besides `launch`, the scripts accepts several other commands - use `./rage-a2.sh --help` to see their names and descriptions.
 
 ... and type `docker-compose ps` to check that everything has been launched. Expected output:
 
