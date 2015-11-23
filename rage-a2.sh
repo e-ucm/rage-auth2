@@ -22,6 +22,8 @@ MIN_COMPOSE_VERSION='1.5'
 DOCKER_SH_URL='https://get.docker.com/'
 COMPOSE_BASE_URL='https://github.com/docker/compose/releases/download/'
 COMPOSE_INSTALL_TARGET='/usr/local/bin/docker-compose'
+# compose flags
+COMPOSE_UP_WITH_FLAGS="--x-networking up -d --force-recreate --no-deps"
 
 # help contents
 function help() {
@@ -34,20 +36,24 @@ cat << EOF
 
   OPERATION one of the following:
 
-    install:   Install all requirements (docker, docker-compose) 
-               and download updated versions of all container images    
-    uninstall: Remove all downloaded container images, 
-               freeing disk space
-    start:     Launch all containers by stages, giving them 
-               time to link to each other
-    launch:    Install (as above), and then start.
-    stop:      Gracefully stop all containers. No data will be lost.
-    restart:   Stop (as above) and then start again
-    report:    Generate a report.txt file suitable for filing an issue.
-               The report will contain all service logs, and essential data
-               on your OS, docker and docker-compose versions.
-    purge:     Kill and remove all data in all containers
-               *Any information stored in these containers will be lost*
+    install:    Install all requirements (docker, docker-compose) 
+                and download updated versions of all container images    
+    uninstall:  Remove all downloaded container images, 
+                freeing disk space
+    start:      Launch all containers by stages, giving them 
+                time to link to each other
+    launch:     Install (as above), and then start.
+    stop:       Gracefully stop all containers. No data will be lost.
+    restart:    Stop (as above) and then start again
+    report:     Generate a report.txt file suitable for filing an issue.
+                The report will contain all service logs, and essential data
+                on your OS, docker and docker-compose versions.
+    network:    Display current docker-network names and IPs. 
+                Good for general diagnostics.
+    shell <id>: Opens a bash shell into the container with name <id>.
+                Good for debugging. Ids are symbolic (eg.: 'a2' or 'redis')
+    purge:      Kill and remove all data in all containers
+                *Any information stored in these containers will be lost*
 
   --help    display this help and exit
 EOF
@@ -79,6 +85,11 @@ function main() {
             install && start ;;
         "report") \
             report ;;
+        "network") \
+            check_docker_launched && network ;;
+        "shell") \
+            if ! [ -z $2 ] ; then check_docker_launched && shell_into $2 ; \
+            else echo "  Missing parameter <id> for operation 'shell'" ; fi ;;
         "--help") \
             help ;;
         *) echo \
@@ -222,7 +233,7 @@ function get_composition_and_containers() {
   recho "      Downloading images"
   recho "-------------------------------"
   for IMAGE in $(image_list) ; do
-    docker pull $IMAGE
+    docker pull ${IMAGE}
   done
 }
 
@@ -232,9 +243,10 @@ function launch_and_wait() {
   shift
   SERVICES=$@
   recho
-  recho "... launching $SERVICES and waiting $DELAY seconds ..."
+  recho "... launching ${SERVICES} and waiting ${DELAY} seconds ..."
   recho
-  docker-compose up -d --force-recreate --no-deps $SERVICES &
+  echo "docker-compose ${COMPOSE_UP_WITH_FLAGS} ${SERVICES}"
+  docker-compose ${COMPOSE_UP_WITH_FLAGS} ${SERVICES} &
   sleep "${DELAY}s"
 }
 
@@ -272,7 +284,7 @@ function uninstall() {
   stop
   RAGE_IMAGES=$(docker images -q 'eucm/*')
   if [ -z "$RAGE_IMAGES" ] ; then
-  recho "no RAGE images to remove."
+    recho "no RAGE images to remove."
   else 
     recho "       Removing images"
     recho "-------------------------------"
@@ -284,8 +296,11 @@ function uninstall() {
 function start() {
   recho "       Launching images"
   recho "-------------------------------"
-  launch_and_wait 60 redis mongo
-  launch_and_wait 1 a2
+  launch_and_wait 5 redis mongo
+  wait_for_service redis 6379
+  wait_for_service mongo 27017
+  launch_and_wait 5 a2
+  wait_for_service a2 3000
   recho ' * use "docker-compose logs <service> to inspect service logs'
   recho ' * use "docker-compose ps" to see status of all services'
   recho 'output of "docker-compose ps" follows:'
@@ -299,12 +314,65 @@ function stop() {
   docker-compose stop
 }
 
+# poll service until connection succeeds
+function wait_for_service() {
+  docker_map
+  SERVICE_IP=$( docker inspect ${CONTAINERS[$1]} \
+    | grep IPAddress | grep -oE '([0-9]{1,3}[.]*){4}' )
+  echo -n "Waiting for $1 to be up at ${SERVICE_IP}:$2 ... "
+  T=0
+  until netcat -z ${SERVICE_IP} $2 ; do
+      sleep 1
+      echo -n "."
+      ((T++))
+  done
+  echo " OK! (took ${T}s)"
+}
+
+# map internal docker hashes to container-names and vice-versa
+function docker_map() {
+  declare -g -A CONTAINERS
+  while read -r LINE ; do
+    NAME=${LINE##* }
+    HASH=${LINE%% *}
+    XHASH="x${HASH}"
+    CONTAINERS[$XHASH]=$NAME
+    CONTAINERS[$NAME]=$HASH
+  done < <( docker ps | tail -n +2 | sed -e 's:   .*   : :g' )
+}
+
+# display networking info
+function network() {
+  recho "       Displaying network information"
+  recho "-------------------------------"
+  docker_map  
+  while read -r LINE ; do
+    LONG_HASH=${LINE%% *}
+    HASH="x${LONG_HASH:0:12}"
+    echo ${LINE} | sed -e "s/[a-f0-9]*/${CONTAINERS[$HASH]}/"
+  done < <( docker network inspect $(basename $(pwd) | sed -e "s:[_ -]*::g") \
+    | grep -E '([a-f0-9]+["]: {$)|(IPv4)' \
+    | xargs -n 4 | sed -e 's/:.*: / /;s:/.*,::' \
+  )
+}
+
+# entering into shell for a given container name
+function shell_into() {
+  recho "       Displaying bash shell for $1"
+  recho "-------------------------------"
+  docker_map  
+  docker exec -it ${CONTAINERS[$1]} /bin/bash
+}
+
 # stop & purge containers
-function stop() {
-  recho "       Stopping containers"
+function purge() {
+  recho "       Purging containers"
   recho "-------------------------------"
   docker-compose kill
   docker-compose rm -f -v
+  recho "(you may need root permissions to empty the data volume)"
+  sudo rm -r data/* \
+    && recho "data volume emptied"
 }
 
 # entrypoint

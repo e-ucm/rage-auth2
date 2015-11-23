@@ -2,103 +2,32 @@
 # RAGE WP2 server-side infrastructure
 # This version requires the use of 
 #   docker v1.9+
-#   docker-compose v1.5+, running with --x-experimental-networking
+#   docker-compose v1.5+, running with --x-networking
 #
 
 # A fast in-memory store
 #     saves data to ./data/redis
 redis:
     image: redis:3.0
-    volumes:
+    container_name: "redis"
+    volumes: 
       - "./data/redis:/data"
 
 # A scalable cache
 #     saves data to ./data/mongo
 mongo:
     image: mongo:3.0
+    container_name: "mongo"
     volumes:
       - "./data/mongo:/data/db"
 
-# Full-text search & analytics DB
-#     saves data to ./data/elastic
-elastic:
-    image: elasticsearch:1.7.3
-    volumes:
-      - "./data/elastic:/usr/share/elasticsearch/data"
-
-# Kafka (A scalable queue) + Zookeeper (Distributed conf. service)
-# as of 2015.11 -- kafka:0.8.2, zookeeper:3.4.5+dfsg-2
-kzk:
-    image: spotify/kafka
-
-# nimbus: supervises everything; talks to zookeeper
-# in e-ucm/dockerized-storm -- storm:0.9.5
-#    requires: kzk
-nimbus:
-    image: eucm/storm-nimbus
-    ports:
-        - "6627:6627"
-
-# ui: allows access to logs
-# in e-ucm/dockerized-storm -- storm:0.9.5
-#    requires: nimbus, kzk
-ui:
-    image: eucm/storm-ui
-    ports: 
-        - "8081:8081"
-
-# supervisor: supervises actual workers
-# in e-ucm/dockerized-storm -- storm:0.9.5
-#   requires: nimbus, kzk, mongo
-supervisor:
-    image: eucm/storm-supervisor
-
-# OpenLRS, an open LRS that speaks xAPI
-#   requires: elastic, redis
-lrs:
-    image: eucm/openlrs
-    ports:
-        - "8080:8080"
-
 # Authentication & Authorization
-# (part of SDA asset: Sever-side Dashboard & Analytics)
-#   requires: redis, mongo
+#    requires: redis, mongo
 a2:
     image: eucm/a2
-    ports: 
-        - "3000:3000"
-
-# Generates RealTime analytics jar, used in Analytics Backend
-realtime:
-    image: eucm/rage-analytics-realtime
-
-# Analytics Backend
-# (SISA asset: Server-side Interaction Storage & Analytics)
-#   requires: a2, kzk, lrs, mongo, nimbus
-back:
-    image: eucm/rage-analytics-backend
-    ports:
-        - "3300:3300"
-    volumes_from:
-        - realtime
-        - nimbus
+    container_name: "a2"
     environment:
-        - RAGE_ANALYTICS_BACKEND_STORMPATH=/app/storm_vol/bin
-        - RAGE_ANALYTICS_BACKEND_REALTIMEJAR=/app/output/realtime-jar-with-dependencies.jar
-
-# Analytics Frontend
-# (part of SDA asset: Server-side Dashboard and Analytics)
-#   requires: a2, back
-front:
-    image: eucm/rage-analytics-frontend
-    ports:
-        - "3350:3350"
-
-# LostInSpace, a sample game with tracking enabled
-#   http://<ip>:9090/setup to set it up, and
-#   http://<ip>:9090/1 to access the 1st game (and so on)
-lis:
-    image: eucm/lostinspace
-    ports:
-        - "9090:9090"
-
+      - REDIS_PORT=tcp://redis:6379
+      - MONGO_PORT=tcp://mongo:27017
+    ports: 
+      - "3000:3000"
