@@ -8,22 +8,25 @@
 # Copyright (C) 2015 RAGE Project - All Rights Reserved
 # Permission to copy and modify is granted under the Apache License 
 #   (http://www.apache.org/licenses/LICENSE-2.0)
-# Last revised 2015/20/11
+# Last revised 2015/02/12
 
 
 # project-related constants
 PROJECT_NAME='rage-auth2'
-PROJECT_URL='https://github.com/e-ucm/rage-auth2/'
-PROJECT_RAW_URL='https://raw.githubusercontent.com/e-ucm/rage-auth2/'
-PROJECT_ISSUE_URL='https://github.com/e-ucm/rage-auth2/issues/'
+PROJECT_URL="https://github.com/e-ucm/${PROJECT_NAME}"
+PROJECT_RAW_URL="https://raw.githubusercontent.com/e-ucm/${PROJECT_NAME}/"
+PROJECT_ISSUE_URL="https://github.com/e-ucm/${PROJECT_NAME}/issues/"
+COMPOSE_NET_NAME='ragea2'
 # external constants
 MIN_DOCKER_VERSION='1.9'
 MIN_COMPOSE_VERSION='1.5'
+INSTALL_COMPOSE_VERSION='1.5.1'
 DOCKER_SH_URL='https://get.docker.com/'
 COMPOSE_BASE_URL='https://github.com/docker/compose/releases/download/'
 COMPOSE_INSTALL_TARGET='/usr/local/bin/docker-compose'
-# compose flags
-COMPOSE_UP_WITH_FLAGS="--x-networking up -d --force-recreate --no-deps"
+# compose settings
+COMPOSE_COMMAND="docker-compose --x-networking -p ${COMPOSE_NET_NAME}"
+COMPOSE_UP_FLAGS="-d --force-recreate --no-deps"
 
 # help contents
 function help() {
@@ -59,38 +62,52 @@ cat << EOF
 EOF
 }
 
-# main entrypoint, called after defining all functions
+
+# main entrypoint, called after defining all functions (see last line)
 function main() {
 
     if [[ $# -eq 0 ]] ; then
         echo "  Usage: $0 [OPERATION | --help]"
         exit 0
     fi
-    
+
     prepare_output    
     case "$1" in
-        "install") \
+        "install")
             install ;;
-        "uninstall") \
-            check_docker_launched && uninstall ; stop_docker_if_launched ;;
-        "start") \
-            check_docker_launched && start ;;
-        "stop") \
-            check_docker_launched && stop ; stop_docker_if_launched ;;
-        "purge") \
+        "uninstall")
+            check_docker_launched && purge && uninstall ; stop_docker_if_launched ;;
+        "start")
+            if [ -z $2 ] ; then
+              check_docker_launched && start 
+            else
+              shift && check_docker_launched && start_ids $@
+            fi ;;
+        "stop")
+            if [ -z $2 ] ; then
+              check_docker_launched && stop && stop_docker_if_launched 
+            else
+              shift && check_docker_launched && stop_ids $@
+            fi ;;
+        "purge")
             check_docker_launched && purge ; stop_docker_if_launched ;;
-        "restart") \
+        "restart")
             check_docker_launched && stop ; check_docker_launched && start ;;
-        "launch") \
+        "launch")
             install && start ;;
-        "report") \
-            report ;;
-        "network") \
+        "status")
+            check_docker_launched && display_status ;;
+        "logs")
+            if [ -z $2 ] ; then echo "  Missing parameter <id>" ; exit ; fi ;
+            check_docker_launched && display_logs $2 ;;
+        "shell")
+            if [ -z $2 ] ; then echo "  Missing parameter <id>" ; exit ; fi ;
+            check_docker_launched && shell_into $2 ;;
+        "network")
             check_docker_launched && network ;;
-        "shell") \
-            if ! [ -z $2 ] ; then check_docker_launched && shell_into $2 ; \
-            else echo "  Missing parameter <id> for operation 'shell'" ; fi ;;
-        "--help") \
+        "report")
+            check_docker_launched && report && stop_docker_if_launched ;;
+        "--help")
             help ;;
         *) echo \
             "  Usage: $0 [OPERATION | --help]" \
@@ -98,7 +115,11 @@ function main() {
     esac
 }
 
-# only for installs
+# ---- 
+# ---- Non-command, auxiliary functions start here
+# ---- 
+
+# only for installs & uninstalls
 function require_root() {
   if [[ $EUID -ne 0 ]]; then
     echo "need super-user (root) privileges to run this script; exiting" 1>&2
@@ -149,6 +170,223 @@ function version_ge() {
   return 0
 }
 
+# installs compose
+function update_compose() {
+  if ( version_ge 'docker' ${MIN_DOCKER_VERSION} ) ; then
+    require_root
+    curl -sSL ${DOCKER_SH_URL} | sh 
+    docker daemon >docker-log.txt 2>&1 &
+    sleep 2s
+  fi
+  if ( version_ge 'docker-compose' ${MIN_COMPOSE_VERSION} ) ; then
+    require_root
+    SUFFIX="$(uname -s)-$(uname -m)"
+    curl -L "${COMPOSE_BASE_URL}${INSTALL_COMPOSE_VERSION}/docker-compose-${SUFFIX}" \
+        > ${COMPOSE_INSTALL_TARGET} \
+        && chmod +x ${COMPOSE_INSTALL_TARGET}
+  fi
+}
+
+# gets composition file and pulls all images from DockerHub
+function get_composition_and_containers() {
+  COMPOSE_YML="${PROJECT_RAW_URL}master/docker-compose.yml"
+  wget ${COMPOSE_YML} -O docker-compose.yml  
+  recho "      Downloading images"
+  recho "-------------------------------"
+  show_and_do ${COMPOSE_COMMAND} pull
+}
+
+# displays a command that is going to be run before running it
+function show_and_do() {
+  echo "running: ${green}$@${green}${normal}"
+  $@
+}
+
+# launches containers and then waits $1 seconds
+function launch_and_wait() {
+  DELAY=$1
+  shift
+  SERVICES=$@
+  recho
+  recho "... launching ${SERVICES} and waiting ${DELAY} seconds ..."
+  recho
+  show_and_do ${COMPOSE_COMMAND} up ${COMPOSE_UP_FLAGS} ${SERVICES}
+  sleep "${DELAY}s"
+}
+
+# poll service until connection succeeds
+function wait_for_service() {
+  docker_map
+  if [ -z ${CONTAINERS[$1]} ] ; then
+    echo "Container $1 failed to launch."
+    echo "Please run '$0 report' to file a new issue to help us help you."
+    exit -1
+  fi
+  SERVICE_IP=$( docker inspect ${CONTAINERS[$1]} \
+    | grep IPAddress | grep -oE '([0-9]{1,3}[.]*){4}' )
+  echo -n "Waiting for $1 to be up at ${SERVICE_IP}:$2 ... "
+  T=0  
+  until netcat -z ${SERVICE_IP} $2 ; do
+      sleep 1s
+      echo -n "."
+      ((T++))
+  done
+  echo -e "\n OK - $1:$2 ($3) reachable after ${T}s"
+}
+
+# check docker running; start if not
+function check_docker_launched() {
+  if ( docker info > /dev/null 2>&1 ) ; then
+    recho "(docker daemon already running; this is good)"
+    DOCKER_WAS_RUNNING=1
+  else 
+    recho "docker not running; attempting to launch it ..."
+    require_root    
+    docker daemon >docker-log.txt 2>&1 &
+    sleep 2s
+  fi
+}
+
+# stop docker (for stop, uninstall scripts) if it was not already running
+function stop_docker_if_launched() {
+  if [ -z "$DOCKER_WAS_RUNNING" ] ; then
+    recho "stopping docker daemon as part of cleanup ..."
+    require_root
+    killall docker
+  fi
+}
+
+# map internal docker hashes to container-names and vice-versa
+function docker_map() {
+  declare -g -A CONTAINERS
+  while read -r LINE ; do
+    NAME=${LINE##* }
+    HASH=${LINE%% *}
+    XHASH="x${HASH}"
+    CONTAINERS[$XHASH]=$NAME
+    CONTAINERS[$NAME]=$HASH
+  done < <( docker ps | tail -n +2 | sed -e 's:   .*   : :g' )
+}
+
+# ---- 
+# ---- Commands start here, in their order according to the help screen
+# ---- 
+
+# install dependencies, download images
+function install() {
+  update_compose
+  get_composition_and_containers
+}
+
+# start containers
+function start() {
+  recho "       Launching images"
+  recho "-------------------------------"
+  
+  # ensure data-dirs exist; 'purge' may have removed them
+  mkdir -p data/{mongo,redis} >/dev/null 2>&1
+  
+  launch_and_wait 5 redis mongo
+  wait_for_service redis 6379 'Redis'
+  wait_for_service mongo 27017 'MongoDB'
+  launch_and_wait 5 a2
+  launch_and_wait 5 sslproxy
+  
+  recho " * use '$0 logs <service>' to inspect service logs"
+  recho " * use '$0 status' to see status of all services"
+  recho "output of '$0 status' follows:"
+  display_status
+}
+
+# stop containers
+function stop() {
+  recho "       Stopping containers"
+  recho "-------------------------------"
+  show_and_do ${COMPOSE_COMMAND} stop
+}
+
+# force-stop and purge containers
+function purge() {
+  recho "       Purging containers"
+  recho "-------------------------------"
+  show_and_do ${COMPOSE_COMMAND} kill 
+  show_and_do ${COMPOSE_COMMAND} rm -f -v 
+  recho "(you may need root permissions to empty the data volume)"
+  sudo rm -r data/* \
+    && recho "data volume emptied"
+}
+
+# uninstall: remove images; optionally nuke all docker
+function uninstall() {
+  RAGE_IMAGES=$(docker images -q 'eucm/*')
+  if [ -z "$RAGE_IMAGES" ] ; then
+    recho "no RAGE images to remove."
+  else 
+    recho "       Removing images"
+    recho "-------------------------------"
+    show_and_do docker rmi $RAGE_IMAGES
+  fi
+  # prompt for total uninstall
+  read -p "Also remove ALL (non-RAGE) containers and images? [y/N] " -n 1 -r
+  echo    # (optional) move to a new line
+  if [[ $REPLY =~ ^[Yy]$ ]] ; then
+    # Delete all containers
+    show_and_do docker rm $(docker ps -a -q)
+    # Delete all images
+    show_and_do docker rmi $(docker images -q)  
+  fi
+}
+
+# display container status
+function display_status() {
+  recho "       Container status"
+  recho "-------------------------------"
+  show_and_do ${COMPOSE_COMMAND} ps
+}
+
+# display logs of a container
+function display_logs() {
+  recho "       Logs for $1 (Ctrl+C to exit)"
+  recho "-------------------------------"
+  show_and_do ${COMPOSE_COMMAND} logs $1
+}
+
+# enter into shell for a given container name
+function shell_into() {
+  recho "       Displaying bash shell for $1 (enter 'exit' to exit)"
+  recho "-------------------------------"
+  show_and_do ${DOCKER_CMD} exec -it ${CONTAINERS[$1]} /bin/bash
+}
+
+# start containers by id
+function start_ids() {
+  recho "       Starting containers: $@"
+  recho "-------------------------------"
+  show_and_do ${COMPOSE_COMMAND} up ${COMPOSE_UP_FLAGS} $@
+}
+
+# stop containers by id
+function stop_ids() {
+  recho "       Stopping containers: $@"
+  recho "-------------------------------"
+  show_and_do ${COMPOSE_COMMAND} stop $@
+}
+
+# display networking info
+function network() {
+  recho "       Displaying network information"
+  recho "-------------------------------"
+  docker_map  
+  while read -r LINE ; do
+    LONG_HASH=${LINE%% *}
+    HASH="x${LONG_HASH:0:12}"
+    echo ${LINE} | sed -e "s/[a-f0-9]*/${CONTAINERS[$HASH]}/"
+  done < <( docker network inspect ${COMPOSE_NET_NAME} \
+    | grep -E '([a-f0-9]+["]: {$)|(IPv4)' \
+    | xargs -n 4 | sed -e 's/:.*: / /;s:/.*,::' \
+  )
+}
+
 # builds a report-file, which can be used to help resolve issues
 function report() {
   REPORT_FILE="report-$(date -Iminutes | sed -e "s/[:T-]/_/g;s/[+].*//").txt"
@@ -161,9 +399,15 @@ function report() {
   docker -v >> ${REPORT_FILE}
   docker-compose -v >> ${REPORT_FILE}
   
-  recho " ... adding hashes of this script and the docker-compose.yml file"
+  recho " ... adding hashes of local rage-*.sh scripts and *.yml file"
   echo "[Script and .yml versions]" >> ${REPORT_FILE}
-  sha1sum rage-*.sh docker-compose.yml >> ${REPORT_FILE}
+  sha1sum rage-*.sh *.yml >> ${REPORT_FILE}
+  
+  for F in *.yml ; do 
+    recho " ... adding ${F} file"
+    echo "[Contents of ${F}]" >> ${REPORT_FILE}
+    cat ${F} >> ${REPORT_FILE}
+  done
   
   recho " ... adding kernel version and linux distribution string"
   echo "[Kernel and distro]" >> ${REPORT_FILE}
@@ -180,10 +424,10 @@ function report() {
   free >> ${REPORT_FILE}
   df -h >> ${REPORT_FILE}
   cat /proc/cpuinfo >> ${REPORT_FILE}
-    
+  
   recho " ... adding output of docker-compose ps"
   echo "[Output of docker-compose ps]" >> ${REPORT_FILE}
-  docker-compose ps >> ${REPORT_FILE}
+  ${COMPOSE_COMMAND} ps >> ${REPORT_FILE}
   
   recho " ... adding output of docker-compose logs"
   echo "[Output of docker-compose logs]" >> ${REPORT_FILE}
@@ -199,180 +443,6 @@ function report() {
   done
   recho " file issues at ${PROJECT_ISSUE_URL}"
   recho " including ${REPORT_FILE} as an attachment"
-}
-
-# installs compose
-function update_compose() {
-  if ( version_ge 'docker' ${MIN_DOCKER_VERSION} ) ; then
-    require_root
-    curl -sSL ${DOCKER_SH_URL} | sh 
-    ( docker daemon & )
-    sleep 2s
-  fi
-  if ( version_ge 'docker-compose' ${MIN_COMPOSE_VERSION} ) ; then
-    require_root
-    SUFFIX="$(uname -s)-$(uname -m)"
-    curl -L "${COMPOSE_BASE_URL}${MIN_COMPOSE_VERSION}/docker-compose-${SUFFIX}" \
-        > ${COMPOSE_INSTALL_TARGET} \
-        && chmod +x ${COMPOSE_INSTALL_TARGET}
-  fi
-}
-
-# retrieve space-separated list of images from docker-compose.yml file
-function image_list() {
-grep "image:" docker-compose.yml \
-    | awk '{print $2, " "}' \
-    | xargs
-}
-
-# gets composition file and pulls all images from DockerHub
-function get_composition_and_containers() {
-  BASE="https://raw.githubusercontent.com/e-ucm/rage-analytics/"
-  COMPOSE_YML="${BASE}master/docker-compose.yml"
-  wget ${COMPOSE_YML} -O docker-compose.yml  
-  recho "      Downloading images"
-  recho "-------------------------------"
-  for IMAGE in $(image_list) ; do
-    docker pull ${IMAGE}
-  done
-}
-
-# launches containers and then waits $1 seconds
-function launch_and_wait() {
-  DELAY=$1
-  shift
-  SERVICES=$@
-  recho
-  recho "... launching ${SERVICES} and waiting ${DELAY} seconds ..."
-  recho
-  echo "docker-compose ${COMPOSE_UP_WITH_FLAGS} ${SERVICES}"
-  docker-compose ${COMPOSE_UP_WITH_FLAGS} ${SERVICES} &
-  sleep "${DELAY}s"
-}
-
-# check docker running; start if not
-function check_docker_launched() {
-  if ( docker info > /dev/null 2>&1 ) ; then
-    recho "(docker daemon already running; this is good)"
-    DOCKER_WAS_RUNNING=1
-  else 
-    recho "docker not running; attempting to launch it ..."
-    require_root
-    ( docker daemon & )
-    sleep 2s
-  fi
-}
-
-# stop docker (for stop, uninstall scripts) if it was not already running
-function stop_docker_if_launched() {
-  if [ -z "$DOCKER_WAS_RUNNING" ] ; then
-    recho "stopping docker daemon as part of cleanup ..."
-    require_root
-    killall docker
-  fi
-}
-
-# install dependencies, download images
-function install() {
-  update_compose
-  get_composition_and_containers
-}
-
-
-# uninstall: remove images
-function uninstall() {
-  stop
-  RAGE_IMAGES=$(docker images -q 'eucm/*')
-  if [ -z "$RAGE_IMAGES" ] ; then
-    recho "no RAGE images to remove."
-  else 
-    recho "       Removing images"
-    recho "-------------------------------"
-    docker rmi $RAGE_IMAGES
-  fi   
-}
-
-# start containers
-function start() {
-  recho "       Launching images"
-  recho "-------------------------------"
-  launch_and_wait 5 redis mongo
-  wait_for_service redis 6379
-  wait_for_service mongo 27017
-  launch_and_wait 5 a2
-  wait_for_service a2 3000
-  recho ' * use "docker-compose logs <service> to inspect service logs'
-  recho ' * use "docker-compose ps" to see status of all services'
-  recho 'output of "docker-compose ps" follows:'
-  docker-compose ps
-}
-
-# stop containers
-function stop() {
-  recho "       Stopping containers"
-  recho "-------------------------------"
-  docker-compose stop
-}
-
-# poll service until connection succeeds
-function wait_for_service() {
-  docker_map
-  SERVICE_IP=$( docker inspect ${CONTAINERS[$1]} \
-    | grep IPAddress | grep -oE '([0-9]{1,3}[.]*){4}' )
-  echo -n "Waiting for $1 to be up at ${SERVICE_IP}:$2 ... "
-  T=0
-  until netcat -z ${SERVICE_IP} $2 ; do
-      sleep 1
-      echo -n "."
-      ((T++))
-  done
-  echo " OK! (took ${T}s)"
-}
-
-# map internal docker hashes to container-names and vice-versa
-function docker_map() {
-  declare -g -A CONTAINERS
-  while read -r LINE ; do
-    NAME=${LINE##* }
-    HASH=${LINE%% *}
-    XHASH="x${HASH}"
-    CONTAINERS[$XHASH]=$NAME
-    CONTAINERS[$NAME]=$HASH
-  done < <( docker ps | tail -n +2 | sed -e 's:   .*   : :g' )
-}
-
-# display networking info
-function network() {
-  recho "       Displaying network information"
-  recho "-------------------------------"
-  docker_map  
-  while read -r LINE ; do
-    LONG_HASH=${LINE%% *}
-    HASH="x${LONG_HASH:0:12}"
-    echo ${LINE} | sed -e "s/[a-f0-9]*/${CONTAINERS[$HASH]}/"
-  done < <( docker network inspect $(basename $(pwd) | sed -e "s:[_ -]*::g") \
-    | grep -E '([a-f0-9]+["]: {$)|(IPv4)' \
-    | xargs -n 4 | sed -e 's/:.*: / /;s:/.*,::' \
-  )
-}
-
-# entering into shell for a given container name
-function shell_into() {
-  recho "       Displaying bash shell for $1"
-  recho "-------------------------------"
-  docker_map  
-  docker exec -it ${CONTAINERS[$1]} /bin/bash
-}
-
-# stop & purge containers
-function purge() {
-  recho "       Purging containers"
-  recho "-------------------------------"
-  docker-compose kill
-  docker-compose rm -f -v
-  recho "(you may need root permissions to empty the data volume)"
-  sudo rm -r data/* \
-    && recho "data volume emptied"
 }
 
 # entrypoint
