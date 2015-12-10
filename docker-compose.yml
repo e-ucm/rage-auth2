@@ -29,5 +29,20 @@ a2:
     environment:
       - REDIS_PORT=tcp://redis:6379
       - MONGO_PORT=tcp://mongo:27017
+
+# TLS Termination
+#    exposes a2, but encrypted
+sslproxy:
+    image: eucm/nginx-ssl-proxy
+    container_name: "sslproxy"
+    environment:
+      - ENABLE_SSL=true
+      - ENABLE_BASIC_AUTH=false
+      - TARGET_SERVICE=a2:3000
+    volumes:
+      - ./keys/public.crt:/etc/secrets/proxycert 
+      - ./keys/private.key:/etc/secrets/proxykey 
+      - ./keys/dh2048.pem:/etc/secrets/dhparam       
     ports: 
-      - "3000:3000"
+      - "80:80"
+      - "443:443"
